@@ -14,14 +14,21 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Ensures full history for stable git pushes
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # Updated to v5 for better Node.js compatibility
         with:
-          python-version: '3.9'
+          python-version: '3.11' # Upgraded from 3.9 to remove EOL warnings
 
       - name: Install dependencies
-        run: pip install feedparser requests google-genai
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt # Use the pinned requirements.txt we just adjusted
+
+      - name: Ensure memory file exists
+        run: touch sent_urls.txt # Fixes the "pathspec did not match any files" error
 
       - name: Run Agent
         env:
@@ -33,5 +40,6 @@ jobs:
         run: |
           git config --global user.name 'Marketing Bot'
           git config --global user.email 'actions@github.com'
-          git add sent_urls.txt || echo "No memory file yet"
+          git add sent_urls.txt
+          # Only commit and push if there are actual changes to the memory file
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update sent URLs" && git push)
