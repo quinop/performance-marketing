@@ -130,7 +130,7 @@ def get_summary_safe(items, system_instruction):
     text_blob = "\n".join([f"- [{i['source']}] {i['title']}: {i['desc']}" for i in items])
     try:
         response = client.models.generate_content(
-            model="gemini-3.1-flash-lite-preview",
+            model="gemini-1.5-flash",
             contents=[f"Context: {text_blob}"],
             config=types.GenerateContentConfig(system_instruction=system_instruction)
         )
