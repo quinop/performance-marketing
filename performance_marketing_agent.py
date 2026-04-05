@@ -12,10 +12,11 @@ from google.genai import types
 GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
 DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL') 
 
-client = genai.Client(api_key=GEMINI_KEY, http_options={'api_version': 'v1'})
+# Using v1beta for access to 2026 models like 3.1-flash-lite
+client = genai.Client(api_key=GEMINI_KEY, http_options={'api_version': 'v1beta'})
 MEMORY_FILE = "sent_urls.txt"
 
-# --- 2. SOURCES ---
+# --- 2. SOURCES (Adjusted for Marketing) ---
 AD_PLATFORM_SOURCES = {
     "Google Ads Blog": "https://blog.google/products/ads-commerce/rss/",
     "Search Engine Land (PPC)": "https://searchengineland.com/library/ppc/feed",
@@ -69,49 +70,38 @@ def fetch_data(source_dict):
             logging.error(f"Fetch failed for {name}: {e}")
     return items, new_urls
 
-# --- 4. ROBUST SINGLE-CALL SUMMARIZATION ---
-def get_unified_report(ad_items, tool_items):
-    if not ad_items and not tool_items: return None
+# --- 4. ROBUST SUMMARIZATION (Consolidated to avoid 429s) ---
+def get_summary_safe(items, instruction):
+    if not items: return None
     
-    # Combine items with clear labels so the AI knows which is which
-    context_parts = []
-    if ad_items:
-        context_parts.append("### SECTION: AD PLATFORMS")
-        for i in ad_items:
-            context_parts.append(f"- [{i['source']}] {i['title']}: {i['desc']}")
+    # Merge instruction into prompt to solve the 'systemInstruction' 400 error
+    text_blob = "\n".join([f"- [{i['source']}] {i['title']}: {i['desc']}" for i in items])
+    full_prompt = f"{instruction}\n\nContext:\n{text_blob}"
     
-    if tool_items:
-        context_parts.append("\n### SECTION: TOOLS & MARKET")
-        for i in tool_items:
-            context_parts.append(f"- [{i['source']}] {i['title']}: {i['desc']}")
-            
-    text_blob = "\n".join(context_parts)
-    
-    # The unified instruction
-    instruction = (
-        "You are an expert Performance Marketing Analyst. Summarize the provided news items. "
-        "Cross-reference stories from different sources if they cover the same topic to avoid duplication. "
-        "Format the output into two clear markdown sections: '## 📡 AD PLATFORMS' and '## 🛠️ TOOLS & MARKET'. "
-        "For each update, use this format: **Platform/Tool**: One sentence summary. Use bullet points."
-    )
-
-    models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash"] # 1.5 first for higher rate limit stability
+    # Updated 2026 Model List
+    models_to_try = ["gemini-2.5-flash", "gemini-3.1-flash-lite-preview"]
     
     for model_id in models_to_try:
         for attempt in range(2): 
             try:
-                full_prompt = f"{instruction}\n\nContext to process:\n{text_blob}"
-                response = client.models.generate_content(model=model_id, contents=full_prompt)
+                response = client.models.generate_content(
+                    model=model_id,
+                    contents=full_prompt
+                )
                 logging.info(f"✅ Success with {model_id}")
                 return response.text
             except Exception as e:
                 err_str = str(e).lower()
-                if "429" in err_str or "404" in err_str:
-                    logging.warning(f"Moving to next model/attempt due to error: {err_str[:50]}")
+                if "429" in err_str:
+                    logging.warning(f"🛑 Quota hit for {model_id}. Trying next model.")
                     break 
+                elif "404" in err_str:
+                    logging.warning(f"🔍 {model_id} not found. Trying next.")
+                    break
                 elif "503" in err_str:
                     time.sleep(10)
                 else:
+                    logging.error(f"❌ Error: {e}")
                     break 
     return None
 
@@ -119,7 +109,7 @@ def send_to_discord(message):
     if not DISCORD_WEBHOOK_URL: return
     payload = {
         "content": message[:1990],
-        "username": "Performance Marketing Bot",
+        "username": "Intelligence Bot",
         "avatar_url": "https://cdn-icons-png.flaticon.com/512/1998/1998087.png"
     }
     try:
@@ -139,15 +129,28 @@ def run_agent():
         logging.info("No new news found.")
         return
 
-    # One single call to summarize everything
-    report_body = get_unified_report(ad_items, tool_items)
+    # Using the HK structure: separate summaries, then combine for the report
+    ad_summary = get_summary_safe(
+        ad_items, 
+        "Summarize top 4 Ad Platform updates. Format: **Platform** (Source): One sentence."
+    )
 
-    if report_body:
-        final_msg = f"# 🚀 PERFORMANCE MARKETING DAILY\n*Date: {datetime.now().strftime('%Y-%m-%d')}*\n\n{report_body}"
+    tool_summary = get_summary_safe(
+        tool_items, 
+        "Summarize top 3 ASO/Tool updates. Format: **Tool** (Source): One sentence."
+    )
+
+    if ad_summary or tool_summary:
+        final_msg = f"# 🚀 PERFORMANCE MARKETING DAILY\n*Date: {datetime.now().strftime('%Y-%m-%d')}*\n\n"
+        if ad_summary:
+            final_msg += f"## 📡 AD PLATFORMS\n{ad_summary}\n\n"
+        if tool_summary:
+            final_msg += f"## 🛠️ TOOLS & MARKET\n{tool_summary}\n"
+
         send_to_discord(final_msg)
         save_sent_urls(ad_urls + tool_urls)
     else:
-        logging.error("AI failed to generate the report.")
+        logging.error("AI failed to generate summaries.")
 
 if __name__ == "__main__":
     try:
