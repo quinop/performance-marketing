@@ -1,0 +1,36 @@
+name: Daily Marketing Update
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs once a day at midnight UTC
+  workflow_dispatch: # Allows you to run it manually
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install feedparser requests google-genai
+
+      - name: Run Agent
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python performance_marketing_agent.py
+
+      - name: Commit Memory
+        run: |
+          git config --global user.name 'Marketing Bot'
+          git config --global user.email 'bot@noreply.github.com'
+          git add sent_urls.txt
+          git commit -m "Update sent URLs memory [skip ci]" || echo "No changes to commit"
+          git push
