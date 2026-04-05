@@ -12,7 +12,11 @@ from google.genai import types
 GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
 DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL') 
 
-client = genai.Client(api_key=GEMINI_KEY)
+# Force API version 'v1' to avoid the 404/v1beta issues
+client = genai.Client(
+    api_key=GEMINI_KEY,
+    http_options={'api_version': 'v1'}
+)
 MEMORY_FILE = "sent_urls.txt"
 
 # --- 2. PERFORMANCE MARKETING SOURCES ---
@@ -62,7 +66,6 @@ def fetch_data(source_dict):
             feed = feedparser.parse(resp.content)
             for entry in feed.entries[:8]:
                 if entry.link not in sent_urls:
-                    # Clean the description to avoid breaking the prompt
                     summary_text = entry.get('summary', '')[:300].replace('\n', ' ')
                     items.append({"source": name, "title": entry.title, "link": entry.link, "desc": summary_text})
                     new_urls.append(entry.link)
@@ -96,7 +99,6 @@ def run_agent():
     ad_items, ad_urls = fetch_data(AD_PLATFORM_SOURCES)
     tool_items, tool_urls = fetch_data(TOOL_ASO_SOURCES)
 
-    # --- ADJUSTMENT: ONLY PROCEED IF NEWS EXISTS ---
     if not ad_items and not tool_items:
         logging.info("No new news found since last check. Exiting.")
         return
@@ -117,7 +119,6 @@ def run_agent():
             "Summarize updates for ASO tools (AppTweak, Sensor Tower) or industry shifts. Use bullet points. Format: **Tool**: Summary (1 sentence)."
         )
 
-    # Only compile and send if Gemini actually returned something
     if ad_summary or tool_summary:
         final_msg = f"# 🚀 PERFORMANCE MARKETING DAILY\n*Date: {datetime.now().strftime('%Y-%m-%d')}*\n\n"
         
@@ -138,14 +139,13 @@ def get_summary_safe(items, system_instruction):
         
     text_blob = "\n".join([f"- [{i['source']}] {i['title']}: {i['desc']}" for i in items])
     
-    # Ensure we aren't sending an empty string to the model
     if not text_blob.strip():
         return None
 
     try:
-        # Using 1.5-flash for maximum stability
+        # Using the standard stable model name
         response = client.models.generate_content(
-            model="gemini-3.1-flash-lite-preview",
+            model="gemini-1.5-flash",
             contents=[f"Context: {text_blob}"],
             config=types.GenerateContentConfig(system_instruction=system_instruction)
         )
