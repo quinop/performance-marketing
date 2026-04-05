@@ -149,7 +149,7 @@ def get_summary_safe(items, instruction):
         
         # Use gemini-1.5-flash for production stability
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-3.1-flash-gemini-3.1-flash-lite-preview",
             contents=full_prompt
         )
         return response.text
