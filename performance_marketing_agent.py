@@ -12,7 +12,6 @@ from google.genai import types
 GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
 DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL') 
 
-# Force stable API version to avoid the 404s and 400s seen in logs
 client = genai.Client(api_key=GEMINI_KEY, http_options={'api_version': 'v1'})
 MEMORY_FILE = "sent_urls.txt"
 
@@ -70,62 +69,64 @@ def fetch_data(source_dict):
             logging.error(f"Fetch failed for {name}: {e}")
     return items, new_urls
 
-# --- 4. ROBUST SUMMARIZATION (Adjusted for 429/404 Errors) ---
-def get_summary_safe(items, instruction):
-    if not items: return None
-    text_blob = "\n".join([f"- [{i['source']}] {i['title']}: {i['desc']}" for i in items])
+# --- 4. ROBUST SINGLE-CALL SUMMARIZATION ---
+def get_unified_report(ad_items, tool_items):
+    if not ad_items and not tool_items: return None
     
-    # Using 1.5-flash as the fallback because 3.1-flash-lite is 404-ing in logs
-    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash"]
+    # Combine items with clear labels so the AI knows which is which
+    context_parts = []
+    if ad_items:
+        context_parts.append("### SECTION: AD PLATFORMS")
+        for i in ad_items:
+            context_parts.append(f"- [{i['source']}] {i['title']}: {i['desc']}")
+    
+    if tool_items:
+        context_parts.append("\n### SECTION: TOOLS & MARKET")
+        for i in tool_items:
+            context_parts.append(f"- [{i['source']}] {i['title']}: {i['desc']}")
+            
+    text_blob = "\n".join(context_parts)
+    
+    # The unified instruction
+    instruction = (
+        "You are an expert Performance Marketing Analyst. Summarize the provided news items. "
+        "Cross-reference stories from different sources if they cover the same topic to avoid duplication. "
+        "Format the output into two clear markdown sections: '## 📡 AD PLATFORMS' and '## 🛠️ TOOLS & MARKET'. "
+        "For each update, use this format: **Platform/Tool**: One sentence summary. Use bullet points."
+    )
+
+    models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash"] # 1.5 first for higher rate limit stability
     
     for model_id in models_to_try:
         for attempt in range(2): 
             try:
-                # Merge instruction into content to avoid 'systemInstruction' 400 errors
-                full_prompt = f"{instruction}\n\nContext to summarize:\n{text_blob}"
-                
-                response = client.models.generate_content(
-                    model=model_id,
-                    contents=full_prompt
-                )
+                full_prompt = f"{instruction}\n\nContext to process:\n{text_blob}"
+                response = client.models.generate_content(model=model_id, contents=full_prompt)
                 logging.info(f"✅ Success with {model_id}")
                 return response.text
             except Exception as e:
                 err_str = str(e).lower()
-                # Handle 429 (Too many requests)
-                if "429" in err_str:
-                    logging.warning(f"🛑 Quota hit for {model_id}. Trying next model.")
+                if "429" in err_str or "404" in err_str:
+                    logging.warning(f"Moving to next model/attempt due to error: {err_str[:50]}")
                     break 
-                # Handle 404 (Not Found) - happens with 3.1-flash-lite in logs
-                elif "404" in err_str:
-                    logging.warning(f"🔍 Model {model_id} not available. Moving to fallback.")
-                    break
-                # Handle 503 (Service Busy)
-                elif "503" in err_str or "unavailable" in err_str:
-                    logging.warning(f"⏳ {model_id} busy. Retrying in 10s... ({attempt+1}/2)")
+                elif "503" in err_str:
                     time.sleep(10)
                 else:
-                    logging.error(f"❌ Error with {model_id}: {e}")
                     break 
     return None
 
 def send_to_discord(message):
-    if not DISCORD_WEBHOOK_URL:
-        logging.error("No Discord Webhook URL found.")
-        return
-    
+    if not DISCORD_WEBHOOK_URL: return
     payload = {
         "content": message[:1990],
         "username": "Performance Marketing Bot",
         "avatar_url": "https://cdn-icons-png.flaticon.com/512/1998/1998087.png"
     }
-    
     try:
         r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=15)
         r.raise_for_status()
-        logging.info("Successfully sent message to Discord.")
     except Exception as e:
-        logging.error(f"Discord Webhook failed: {e}")
+        logging.error(f"Discord failed: {e}")
 
 # --- 5. EXECUTION ---
 def run_agent():
@@ -135,30 +136,18 @@ def run_agent():
     tool_items, tool_urls = fetch_data(TOOL_ASO_SOURCES)
 
     if not ad_items and not tool_items:
-        logging.info("No new news found. Exiting.")
+        logging.info("No new news found.")
         return
 
-    ad_summary = get_summary_safe(
-        ad_items, 
-        "Summarize updates for Meta, Google, TikTok, or Apple Ads. Use bullet points. Format: **Platform**: Summary (1 sentence)."
-    )
+    # One single call to summarize everything
+    report_body = get_unified_report(ad_items, tool_items)
 
-    tool_summary = get_summary_safe(
-        tool_items, 
-        "Summarize updates for ASO tools (AppTweak, Sensor Tower) or industry shifts. Use bullet points. Format: **Tool**: Summary (1 sentence)."
-    )
-
-    if ad_summary or tool_summary:
-        final_msg = f"# 🚀 PERFORMANCE MARKETING DAILY\n*Date: {datetime.now().strftime('%Y-%m-%d')}*\n\n"
-        if ad_summary:
-            final_msg += f"## 📡 AD PLATFORMS\n{ad_summary}\n\n"
-        if tool_summary:
-            final_msg += f"## 🛠️ TOOLS & MARKET\n{tool_summary}\n"
-
+    if report_body:
+        final_msg = f"# 🚀 PERFORMANCE MARKETING DAILY\n*Date: {datetime.now().strftime('%Y-%m-%d')}*\n\n{report_body}"
         send_to_discord(final_msg)
         save_sent_urls(ad_urls + tool_urls)
     else:
-        logging.error("AI failed to generate summaries for this batch.")
+        logging.error("AI failed to generate the report.")
 
 if __name__ == "__main__":
     try:
