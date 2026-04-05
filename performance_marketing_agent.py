@@ -12,7 +12,7 @@ from google.genai import types
 GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
 DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL') 
 
-# Force stable API version to avoid the 404s seen in your logs
+# Force stable API version to avoid the 404s and 400s seen in logs
 client = genai.Client(api_key=GEMINI_KEY, http_options={'api_version': 'v1'})
 MEMORY_FILE = "sent_urls.txt"
 
@@ -33,7 +33,7 @@ TOOL_ASO_SOURCES = {
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# --- 3. UTILITIES (Updated from HK project) ---
+# --- 3. UTILITIES ---
 def load_sent_urls():
     if not os.path.exists(MEMORY_FILE): return set()
     try:
@@ -63,7 +63,6 @@ def fetch_data(source_dict):
             feed = feedparser.parse(resp.content)
             for entry in feed.entries[:8]:
                 if entry.link not in sent_urls:
-                    # Clean the description to avoid breaking the prompt
                     summary_text = entry.get('summary', '')[:300].replace('\n', ' ')
                     items.append({"source": name, "title": entry.title, "link": entry.link, "desc": summary_text})
                     new_urls.append(entry.link)
@@ -71,18 +70,18 @@ def fetch_data(source_dict):
             logging.error(f"Fetch failed for {name}: {e}")
     return items, new_urls
 
-# --- 4. ROBUST SUMMARIZATION (Ported from HK project) ---
+# --- 4. ROBUST SUMMARIZATION (Adjusted for 429/404 Errors) ---
 def get_summary_safe(items, instruction):
     if not items: return None
     text_blob = "\n".join([f"- [{i['source']}] {i['title']}: {i['desc']}" for i in items])
     
-    # Models that were 'found' in your logs (avoiding the ones that 404'd)
-    models_to_try = ["gemini-2.0-flash", "gemini-3.1-flash-lite-preview"]
+    # Using 1.5-flash as the fallback because 3.1-flash-lite is 404-ing in logs
+    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash"]
     
     for model_id in models_to_try:
         for attempt in range(2): 
             try:
-                # Merge instruction into prompt to avoid 'systemInstruction' 400 errors
+                # Merge instruction into content to avoid 'systemInstruction' 400 errors
                 full_prompt = f"{instruction}\n\nContext to summarize:\n{text_blob}"
                 
                 response = client.models.generate_content(
@@ -93,14 +92,20 @@ def get_summary_safe(items, instruction):
                 return response.text
             except Exception as e:
                 err_str = str(e).lower()
-                if "429" in err_str or "resource_exhausted" in err_str:
+                # Handle 429 (Too many requests)
+                if "429" in err_str:
                     logging.warning(f"🛑 Quota hit for {model_id}. Trying next model.")
                     break 
+                # Handle 404 (Not Found) - happens with 3.1-flash-lite in logs
+                elif "404" in err_str:
+                    logging.warning(f"🔍 Model {model_id} not available. Moving to fallback.")
+                    break
+                # Handle 503 (Service Busy)
                 elif "503" in err_str or "unavailable" in err_str:
                     logging.warning(f"⏳ {model_id} busy. Retrying in 10s... ({attempt+1}/2)")
                     time.sleep(10)
                 else:
-                    logging.error(f"❌ Model {model_id} error: {e}")
+                    logging.error(f"❌ Error with {model_id}: {e}")
                     break 
     return None
 
@@ -156,4 +161,7 @@ def run_agent():
         logging.error("AI failed to generate summaries for this batch.")
 
 if __name__ == "__main__":
-    run_agent()
+    try:
+        run_agent()
+    except Exception:
+        logging.error(traceback.format_exc())
